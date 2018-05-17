@@ -6,7 +6,8 @@ from struct import pack
 import ipaddress
 import sys
 import signal
-
+import Queue
+import threading
 
 '''
 Script for
@@ -39,67 +40,92 @@ pipes = {
 	'samr'     : MSRPC_UUID_SAMR,
 }
 
-
-if len(sys.argv) != 2:
-	print("{} <ip|subnet>".format(sys.argv[0]))
-	sys.exit(1)
-
-targets = unicode(sys.argv[1])
-
-for target in ipaddress.IPv4Network(targets):
-    target = str(target)
-    sys.stdout.write("%s   \r" % target)
-    sys.stdout.flush()
-    try:
-        conn = MYSMB(target)
-    except:
-        continue
-    print "==============\nIP {}".format(target)
-    try:
-	    conn.login(USERNAME, PASSWORD)
-    except smb.SessionError as e:
-	    print('Login failed: ' + nt_errors.ERROR_MESSAGES[e.error_code][0])
-	    continue
-    finally:
-	    print('Target OS: ' + conn.get_server_os())
-
-    tid = conn.tree_connect_andx('\\\\'+target+'\\'+'IPC$')
-    conn.set_default_tid(tid)
+def producer(q):
+    for target in ipaddress.IPv4Network(targets):
+        name = threading.currentThread().getName()
+        q.put(target)
+    q.join()
 
 
-    # test if target is vulnerable
-    TRANS_PEEK_NMPIPE = 0x23
-    recvPkt = conn.send_trans(pack('<H', TRANS_PEEK_NMPIPE), maxParameterCount=0xffff, maxDataCount=0x800)
-    status = recvPkt.getNTStatus()
-    if status == 0xC0000205:  # STATUS_INSUFF_SERVER_RESOURCES
-	    sys.stdout.write("\033[1;32m")
-	    print('The target is not patched')
-	    sys.stdout.write("\033[1;0m")
+def consume(q):
+    while(True):
+        name = threading.currentThread().getName()
+        target = str(q.get())
+        q.task_done()
 
-    else:
-	    print('The target is patched')
-	    continue
+        #sys.stdout.write("%s   \r" % target)
+        print("%s" % target)
+        #sys.stdout.flush()
+        try:
+            conn = MYSMB(target)
+        except:
+            continue
+        print "==============\nIP {}".format(target)
+        try:
+	        conn.login(USERNAME, PASSWORD)
+        except smb.SessionError as e:
+	        print('Login failed: ' + nt_errors.ERROR_MESSAGES[e.error_code][0])
+	        continue
+        finally:
+	        print('Target OS: ' + conn.get_server_os())
 
-    print('')
-    print('=== Testing named pipes ===')
-    for pipe_name, pipe_uuid in pipes.items():
-	    try:
-		    dce = conn.get_dce_rpc(pipe_name)
-		    dce.connect()
-		    try:
-			    dce.bind(pipe_uuid, transfer_syntax=NDR64Syntax)
-			    print('{}: Ok (64 bit)'.format(pipe_name))
-		    except DCERPCException as e:
-			    if 'transfer_syntaxes_not_supported' in str(e):
-				    print('{}: Ok (32 bit)'.format(pipe_name))
-			    else:
-				    print('{}: Ok ({})'.format(pipe_name, str(e)))
-		    dce.disconnect()
-	    except smb.SessionError as e:
-		    print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error_code][0]))
-	    except smbconnection.SessionError as e:
-		    print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error][0]))
+        tid = conn.tree_connect_andx('\\\\'+target+'\\'+'IPC$')
+        conn.set_default_tid(tid)
 
-    conn.disconnect_tree(tid)
-    conn.logoff()
-    conn.get_socket().close()
+
+        # test if target is vulnerable
+        TRANS_PEEK_NMPIPE = 0x23
+        recvPkt = conn.send_trans(pack('<H', TRANS_PEEK_NMPIPE), maxParameterCount=0xffff, maxDataCount=0x800)
+        status = recvPkt.getNTStatus()
+        if status == 0xC0000205:  # STATUS_INSUFF_SERVER_RESOURCES
+	        sys.stdout.write("\033[1;32m")
+	        print('The target is not patched')
+	        sys.stdout.write("\033[1;0m")
+
+        else:
+	        print('The target is patched')
+	        continue
+
+        print('')
+        print('=== Testing named pipes ===')
+        for pipe_name, pipe_uuid in pipes.items():
+	        try:
+		        dce = conn.get_dce_rpc(pipe_name)
+		        dce.connect()
+		        try:
+			        dce.bind(pipe_uuid, transfer_syntax=NDR64Syntax)
+			        print('{}: Ok (64 bit)'.format(pipe_name))
+		        except DCERPCException as e:
+			        if 'transfer_syntaxes_not_supported' in str(e):
+				        print('{}: Ok (32 bit)'.format(pipe_name))
+			        else:
+				        print('{}: Ok ({})'.format(pipe_name, str(e)))
+		        dce.disconnect()
+	        except smb.SessionError as e:
+		        print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error_code][0]))
+	        except smbconnection.SessionError as e:
+		        print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error][0]))
+
+        conn.disconnect_tree(tid)
+        conn.logoff()
+        conn.get_socket().close()
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+	    print("{} <ip|subnet>".format(sys.argv[0]))
+	    sys.exit(1)
+
+    targets = unicode(sys.argv[1])
+
+    threads_num = 8
+    q = Queue.Queue(maxsize = threads_num)
+
+    for i in range(threads_num):
+        t = threading.Thread(name = "ConsumerThread-"+str(i), target=consume, args=(q,))
+        t.start()
+
+    #1 thread to procuce
+    t = threading.Thread(name = "ProducerThread", target=producer, args=(q,))
+    t.start()
+
+    q.join()
