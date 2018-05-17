@@ -3,13 +3,22 @@ from impacket import smb, smbconnection, nt_errors
 from impacket.uuid import uuidtup_to_bin
 from impacket.dcerpc.v5.rpcrt import DCERPCException
 from struct import pack
+import ipaddress
 import sys
+import signal
+
 
 '''
 Script for
 - check target if MS17-010 is patched or not.
 - find accessible named pipe
 '''
+
+def signal_handler(signal, frame):
+        print('You pressed Ctrl+C!')
+        sys.exit(0)
+signal.signal(signal.SIGINT, signal_handler)
+
 
 USERNAME = ''
 PASSWORD = ''
@@ -32,56 +41,65 @@ pipes = {
 
 
 if len(sys.argv) != 2:
-	print("{} <ip>".format(sys.argv[0]))
+	print("{} <ip|subnet>".format(sys.argv[0]))
 	sys.exit(1)
 
-target = sys.argv[1]
+targets = unicode(sys.argv[1])
 
-conn = MYSMB(target)
-try:
-	conn.login(USERNAME, PASSWORD)
-except smb.SessionError as e:
-	print('Login failed: ' + nt_errors.ERROR_MESSAGES[e.error_code][0])
-	sys.exit()
-finally:
-	print('Target OS: ' + conn.get_server_os())
+for target in ipaddress.IPv4Network(targets):
+    target = str(target)
+    sys.stdout.write("%s   \r" % target)
+    sys.stdout.flush()
+    try:
+        conn = MYSMB(target)
+    except:
+        continue
+    print "==============\nIP {}".format(target)
+    try:
+	    conn.login(USERNAME, PASSWORD)
+    except smb.SessionError as e:
+	    print('Login failed: ' + nt_errors.ERROR_MESSAGES[e.error_code][0])
+	    continue
+    finally:
+	    print('Target OS: ' + conn.get_server_os())
 
-tid = conn.tree_connect_andx('\\\\'+target+'\\'+'IPC$')
-conn.set_default_tid(tid)
-
-
-# test if target is vulnerable
-TRANS_PEEK_NMPIPE = 0x23
-recvPkt = conn.send_trans(pack('<H', TRANS_PEEK_NMPIPE), maxParameterCount=0xffff, maxDataCount=0x800)
-status = recvPkt.getNTStatus()
-if status == 0xC0000205:  # STATUS_INSUFF_SERVER_RESOURCES
-	print('The target is not patched')
-else:
-	print('The target is patched')
-	sys.exit()
+    tid = conn.tree_connect_andx('\\\\'+target+'\\'+'IPC$')
+    conn.set_default_tid(tid)
 
 
-print('')
-print('=== Testing named pipes ===')
-for pipe_name, pipe_uuid in pipes.items():
-	try:
-		dce = conn.get_dce_rpc(pipe_name)
-		dce.connect()
-		try:
-			dce.bind(pipe_uuid, transfer_syntax=NDR64Syntax)
-			print('{}: Ok (64 bit)'.format(pipe_name))
-		except DCERPCException as e:
-			if 'transfer_syntaxes_not_supported' in str(e):
-				print('{}: Ok (32 bit)'.format(pipe_name))
-			else:
-				print('{}: Ok ({})'.format(pipe_name, str(e)))
-		dce.disconnect()
-	except smb.SessionError as e:
-		print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error_code][0]))
-	except smbconnection.SessionError as e:
-		print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error][0]))
+    # test if target is vulnerable
+    TRANS_PEEK_NMPIPE = 0x23
+    recvPkt = conn.send_trans(pack('<H', TRANS_PEEK_NMPIPE), maxParameterCount=0xffff, maxDataCount=0x800)
+    status = recvPkt.getNTStatus()
+    if status == 0xC0000205:  # STATUS_INSUFF_SERVER_RESOURCES
+	    sys.stdout.write("\033[1;32m")
+	    print('The target is not patched')
+	    sys.stdout.write("\033[1;0m")
 
+    else:
+	    print('The target is patched')
+	    continue
 
-conn.disconnect_tree(tid)
-conn.logoff()
-conn.get_socket().close()
+    print('')
+    print('=== Testing named pipes ===')
+    for pipe_name, pipe_uuid in pipes.items():
+	    try:
+		    dce = conn.get_dce_rpc(pipe_name)
+		    dce.connect()
+		    try:
+			    dce.bind(pipe_uuid, transfer_syntax=NDR64Syntax)
+			    print('{}: Ok (64 bit)'.format(pipe_name))
+		    except DCERPCException as e:
+			    if 'transfer_syntaxes_not_supported' in str(e):
+				    print('{}: Ok (32 bit)'.format(pipe_name))
+			    else:
+				    print('{}: Ok ({})'.format(pipe_name, str(e)))
+		    dce.disconnect()
+	    except smb.SessionError as e:
+		    print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error_code][0]))
+	    except smbconnection.SessionError as e:
+		    print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error][0]))
+
+    conn.disconnect_tree(tid)
+    conn.logoff()
+    conn.get_socket().close()
