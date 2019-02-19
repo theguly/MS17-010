@@ -21,7 +21,7 @@ Script for
 
 #!/usr/bin/env python
 def signal_handler(sig, frame):
-        print('You pressed Ctrl+C!')
+        print('Stopped with Ctrl+C!')
         sys.exit(0)
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -50,7 +50,7 @@ pipes = {
 def consume(q):
     while(True):
       target = str(q.get())
-      res = "%s\t" % target
+      res = ""
       sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
       # Check if 445 is open
       if sock.connect_ex((target,445))==0:
@@ -59,7 +59,7 @@ def consume(q):
 	try:
             conn = MYSMB(target)
         except:
-	    res+="\n"
+	    res+="{:<15}".format(target)+"\n"
 	    print res,
   	    q.task_done()
             continue
@@ -68,20 +68,13 @@ def consume(q):
   	try:
 	    conn.login(USERNAME, PASSWORD)
         except smb.SessionError as e:
-	    res+="\n"
+	    res+="{:<15}".format(target)+"\n"
 	    print res,
             q.task_done()
 	    continue
         finally:
 	    s = conn.get_server_os()
-            i = 0
-            while i<40:
-		if i<len(s):
-			res+=s[i]
-		else:
-			res+=" "
-		i+=1
-	    res += "\t"
+	    res+='{:<50}  '.format(s[:50])
 	
 	try:
             tid = conn.tree_connect_andx('\\\\'+target+'\\'+'IPC$')
@@ -92,17 +85,17 @@ def consume(q):
             recvPkt = conn.send_trans(pack('<H', TRANS_PEEK_NMPIPE), maxParameterCount=0xffff, maxDataCount=0x800)
             status = recvPkt.getNTStatus()
             if status == 0xC0000205:  # STATUS_INSUFF_SERVER_RESOURCES
-	        res +=  "NOT patched\t"
+	        res +=  "NOT patched  "
 
             else:
-		res += "patched"
-		res=Style.BRIGHT+Fore.BLUE+res+Style.RESET_ALL+"\n"
+		res +=  "patched"
+		res=Style.BRIGHT+Fore.BLUE+"{:<15}".format(target)+"  "+res+Style.RESET_ALL+"\n"
 		print res,
                 q.task_done()
 	        continue
 
 	except:
-            res+="\n"
+            res+="{:<15}".format(target)+"\n"
 	    print res,
             q.task_done()
 	    continue
@@ -113,53 +106,54 @@ def consume(q):
 		        dce.connect()
 		        try:
 			        dce.bind(pipe_uuid, transfer_syntax=NDR64Syntax)
-			        res += '{}: Ok (64 bit)\t'.format(pipe_name)
+			        res += Fore.GREEN+'{:<8} (64)  '.format(pipe_name[:8])+Style.RESET_ALL
 				found = True
 		        except DCERPCException as e:
 			        if 'transfer_syntaxes_not_supported' in str(e):
-				        res+='{}: Ok (32 bit)\t'.format(pipe_name)
+				        res+=Fore.GREEN+'{:<8} (32)  '.format(pipe_name[:8])+Style.RESET_ALL
 					found = True
 			        else:
-				        res+='{}: Ok ({})\t'.format(pipe_name, str(e))
+				        res+=Fore.GREEN+'{:<8} (??)  '.format(pipe_name[:8])+Style.RESET_ALL
 					found = True
 		        dce.disconnect()
 	        except smb.SessionError as e:
-		        res+='{}: {}\t'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error_code][0])
+		        res+=Fore.RED+'{:<8} DENY  '.format(pipe_name[:8])+Style.RESET_ALL
 	        except smbconnection.SessionError as e:
-		        res+='{}: {}\t'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error][0])
+		        res+=Fore.RED+'{:<8} DENY  '.format(pipe_name[:8])+Style.RESET_ALL
 	
-	try:
-	  conn.disconnect_tree(tid)
-	  conn.logoff()
-          conn.get_socket().close()
-	except:
-	  res=Fore.YELLOW+res+Style.RESET_ALL+"\n"
-	  print res,
-          q.task_done()
-	  continue
+	conn.disconnect_tree(tid)
+	conn.logoff()
+        conn.get_socket().close()
 	if not found:
-          res=Fore.YELLOW+res+Style.RESET_ALL+"\n"
+          res=Fore.RED+"{:<15}".format(target)+"  "+res+Style.RESET_ALL+"\n"
           print res,
           q.task_done()
           continue
 
-        res=Fore.RED+res+Style.RESET_ALL
+        res=Fore.GREEN+"{:<15}".format(target)+"  "+res+Style.RESET_ALL+"\n"
+	print res,
+	q.task_done()
+	continue
      
-      res+="\n"
+      res+="{:<15}".format(target)+"\n"
       print res,
       q.task_done()
 
 
 if __name__ == '__main__':
     # Parameters check
-    if len(sys.argv) != 2:
-	    print("{} <ip|subnet|filename>".format(sys.argv[0]))
+    if len(sys.argv) < 2 or len(sys.argv)>4:
+	    print("{} <ip|subnet|filename> [username] [password]".format(sys.argv[0]))
 	    sys.exit(1)
+    if len(sys.argv) > 2:
+	    USERNAME = sys.argv[2]
+    if len(sys.argv) > 3:
+	    PASSWORD = sys.argv[3]
     ok=False
-    targets = unicode(sys.argv[1])
+    targets = sys.argv[1]
     tgtlist=[]
     try:
-	netw=ipaddress.IPv4Network(targets)
+	netw=ipaddress.IPv4Network(unicode(targets))
 	for ip in netw:
 	    tgtlist.append(ip)
 	ok=True
