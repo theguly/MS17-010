@@ -68,7 +68,7 @@ def consume(q):
   	try:
 	    conn.login(USERNAME, PASSWORD)
         except smb.SessionError as e:
-	    res+="{:<15}".format(target)+"\n"
+	    res+="{:<15}".format(target)+"  "+"Unauthorized"+"\n"
 	    print res,
             q.task_done()
 	    continue
