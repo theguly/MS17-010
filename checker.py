@@ -3,11 +3,15 @@ from impacket import smb, smbconnection, nt_errors
 from impacket.uuid import uuidtup_to_bin
 from impacket.dcerpc.v5.rpcrt import DCERPCException
 from struct import pack
+from colorama import Fore, Back, Style
 import ipaddress
 import sys
 import signal
 import Queue
 import threading
+import time
+import socket
+
 
 '''
 Script for
@@ -15,11 +19,11 @@ Script for
 - find accessible named pipe
 '''
 
-def signal_handler(signal, frame):
-        print('You pressed Ctrl+C!')
+#!/usr/bin/env python
+def signal_handler(sig, frame):
+        print('Stopped with Ctrl+C!')
         sys.exit(0)
 signal.signal(signal.SIGINT, signal_handler)
-
 
 USERNAME = ''
 PASSWORD = ''
@@ -40,92 +44,156 @@ pipes = {
 	'samr'     : MSRPC_UUID_SAMR,
 }
 
-def producer(q):
-    for target in ipaddress.IPv4Network(targets):
-        name = threading.currentThread().getName()
-        q.put(target)
-    q.join()
+
 
 
 def consume(q):
     while(True):
-        name = threading.currentThread().getName()
-        target = str(q.get())
-        q.task_done()
+      target = str(q.get())
+      res = ""
+      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      # Check if 445 is open
+      if sock.connect_ex((target,445))==0:
 
-        #sys.stdout.write("%s   \r" % target)
-        print("%s" % target)
-        #sys.stdout.flush()
-        try:
+	# Try to create a SMB connection
+	try:
             conn = MYSMB(target)
         except:
+	    res+="{:<15}".format(target)+"\n"
+	    print res,
+  	    q.task_done()
             continue
-        print "==============\nIP {}".format(target)
-        try:
-	        conn.login(USERNAME, PASSWORD)
+
+	# Try to authenticate
+  	try:
+	    conn.login(USERNAME, PASSWORD)
         except smb.SessionError as e:
-	        print('Login failed: ' + nt_errors.ERROR_MESSAGES[e.error_code][0])
-	        continue
+	    res+="{:<15}".format(target)+"  "+"Unauthorized"+"\n"
+	    print res,
+            q.task_done()
+	    continue
         finally:
-	        print('Target OS: ' + conn.get_server_os())
+	    s = conn.get_server_os()
+	    res+='{:<50}  '.format(s[:50])
+	
+	try:
+            tid = conn.tree_connect_andx('\\\\'+target+'\\'+'IPC$')
+            conn.set_default_tid(tid)
 
-        tid = conn.tree_connect_andx('\\\\'+target+'\\'+'IPC$')
-        conn.set_default_tid(tid)
+            # test if target is vulnerable
+            TRANS_PEEK_NMPIPE = 0x23
+            recvPkt = conn.send_trans(pack('<H', TRANS_PEEK_NMPIPE), maxParameterCount=0xffff, maxDataCount=0x800)
+            status = recvPkt.getNTStatus()
+            if status == 0xC0000205:  # STATUS_INSUFF_SERVER_RESOURCES
+	        res +=  "NOT patched  "
 
-
-        # test if target is vulnerable
-        TRANS_PEEK_NMPIPE = 0x23
-        recvPkt = conn.send_trans(pack('<H', TRANS_PEEK_NMPIPE), maxParameterCount=0xffff, maxDataCount=0x800)
-        status = recvPkt.getNTStatus()
-        if status == 0xC0000205:  # STATUS_INSUFF_SERVER_RESOURCES
-	        sys.stdout.write("\033[1;32m")
-	        print('The target is not patched')
-	        sys.stdout.write("\033[1;0m")
-
-        else:
-	        print('The target is patched')
+            else:
+		res +=  "patched"
+		res=Style.BRIGHT+Fore.BLUE+"{:<15}".format(target)+"  "+res+Style.RESET_ALL+"\n"
+		print res,
+                q.task_done()
 	        continue
 
-        print('')
-        print('=== Testing named pipes ===')
+	except:
+            res+="{:<15}".format(target)+"\n"
+	    print res,
+            q.task_done()
+	    continue
+	found = False
         for pipe_name, pipe_uuid in pipes.items():
 	        try:
 		        dce = conn.get_dce_rpc(pipe_name)
 		        dce.connect()
 		        try:
 			        dce.bind(pipe_uuid, transfer_syntax=NDR64Syntax)
-			        print('{}: Ok (64 bit)'.format(pipe_name))
+			        res += Fore.GREEN+'{:<8} (64)  '.format(pipe_name[:8])+Style.RESET_ALL
+				found = True
 		        except DCERPCException as e:
 			        if 'transfer_syntaxes_not_supported' in str(e):
-				        print('{}: Ok (32 bit)'.format(pipe_name))
+				        res+=Fore.GREEN+'{:<8} (32)  '.format(pipe_name[:8])+Style.RESET_ALL
+					found = True
 			        else:
-				        print('{}: Ok ({})'.format(pipe_name, str(e)))
+				        res+=Fore.GREEN+'{:<8} (??)  '.format(pipe_name[:8])+Style.RESET_ALL
+					found = True
 		        dce.disconnect()
 	        except smb.SessionError as e:
-		        print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error_code][0]))
+		        res+=Fore.RED+'{:<8} DENY  '.format(pipe_name[:8])+Style.RESET_ALL
 	        except smbconnection.SessionError as e:
-		        print('{}: {}'.format(pipe_name, nt_errors.ERROR_MESSAGES[e.error][0]))
-
-        conn.disconnect_tree(tid)
-        conn.logoff()
+		        res+=Fore.RED+'{:<8} DENY  '.format(pipe_name[:8])+Style.RESET_ALL
+	
+	conn.disconnect_tree(tid)
+	conn.logoff()
         conn.get_socket().close()
+	if not found:
+          res=Fore.RED+"{:<15}".format(target)+"  "+res+Style.RESET_ALL+"\n"
+          print res,
+          q.task_done()
+          continue
+
+        res=Fore.GREEN+"{:<15}".format(target)+"  "+res+Style.RESET_ALL+"\n"
+	print res,
+	q.task_done()
+	continue
+     
+      res+="{:<15}".format(target)+"\n"
+      print res,
+      q.task_done()
+
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-	    print("{} <ip|subnet>".format(sys.argv[0]))
+    # Parameters check
+    if len(sys.argv) < 2 or len(sys.argv)>4:
+	    print("{} <ip|subnet|filename> [username] [password]".format(sys.argv[0]))
 	    sys.exit(1)
+    if len(sys.argv) > 2:
+	    USERNAME = sys.argv[2]
+    if len(sys.argv) > 3:
+	    PASSWORD = sys.argv[3]
+    ok=False
+    targets = sys.argv[1]
+    tgtlist=[]
+    try:
+	netw=ipaddress.IPv4Network(unicode(targets))
+	for ip in netw:
+	    tgtlist.append(ip)
+	ok=True
+    except:
+        pass
+    if not ok:
+	try:
+	    netlist = open(targets,'r').read().splitlines()
+	    for net in netlist:
+		net=net.replace("\n","").replace("\r","")
+		netw=ipaddress.IPv4Network(unicode(net))
+	        for ip in netw:
+        	    tgtlist.append(ip)
+	    ok=True
+	except:
+	    pass
+    if not ok:
+	print("Please check target!")
+	sys.exit()
+    cnt=len(tgtlist)    
+    print("Targets: "+str(cnt))
 
-    targets = unicode(sys.argv[1])
-
-    threads_num = 8
+    # Multithread  
+    # Fill producer
+    threads_num = 32
+    if cnt<threads_num:
+	threads_num=cnt
     q = Queue.Queue(maxsize = threads_num)
-
     for i in range(threads_num):
-        t = threading.Thread(name = "ConsumerThread-"+str(i), target=consume, args=(q,))
-        t.start()
+       t = threading.Thread(target=consume,args=(q,))
+       t.daemon = True
+       t.start()
 
-    #1 thread to procuce
-    t = threading.Thread(name = "ProducerThread", target=producer, args=(q,))
-    t.start()
+    # Start consumer
+    i = 0
+    while i<cnt:
+      thr = 0
+      while i<cnt and thr<threads_num:
+        q.put(tgtlist[i])
+	thr+=1
+	i+=1
+      q.join()
 
-    q.join()
